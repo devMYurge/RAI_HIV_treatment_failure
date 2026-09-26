@@ -1,15 +1,16 @@
-name: hepc_rai
+name: actg175_rai
 channels:
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
-  - numpy=1.26.4
-  - pandas=2.2.2
+  # responsibleai 0.34.0 requires numpy<=1.26.2 AND pandas<2.0.0
+  - numpy=1.26.2
+  - pandas=1.5.3
   - scikit-learn=1.5.1
   - matplotlib=3.9.1
   - seaborn=0.13.2
-  - scipy=1.14.0
+  - scipy=1.11.4
   - jupyter=1.0.0
   - jupyterlab=4.2.4
   - ipywidgets=8.1.3
@@ -17,7 +18,5 @@ dependencies:
   - pip:
       - responsibleai==0.34.0
       - raiwidgets==0.34.0
-      - fairlearn==0.10.0
-      - interpret-community==0.31.0
-      - erroranalysis==0.5.4
       - econml==0.15.1
+      - ucimlrepo>=0.0.7

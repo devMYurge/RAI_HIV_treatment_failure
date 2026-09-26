@@ -1,0 +1,17 @@
+[interpret_ext_blackbox]
+KernelExplainer = interpret_community.shap:KernelExplainer
+LIMEExplainer = interpret_community.lime:LIMEExplainer
+MimicExplainer = interpret_community.mimic:MimicExplainer
+PFIExplainer = interpret_community.permutation:PFIExplainer
+TabularExplainer = interpret_community:TabularExplainer
+
+[interpret_ext_glassbox]
+DecisionTreeExplainableModel = interpret_community.mimic.models:DecisionTreeExplainableModel
+LGBMExplainableModel = interpret_community.mimic.models:LGBMExplainableModel
+LinearExplainableModel = interpret_community.mimic.models:LinearExplainableModel
+SGDExplainableModel = interpret_community.mimic.models:SGDExplainableModel
+
+[interpret_ext_greybox]
+DeepExplainer = interpret_community.shap:DeepExplainer
+LinearExplainer = interpret_community.shap:LinearExplainer
+TreeExplainer = interpret_community.shap:TreeExplainer

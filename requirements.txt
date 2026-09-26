@@ -1,13 +1,13 @@
-
 # ==============================================================
-# ML4HL Hepatitis C RAI Toolbox — pip requirements
+# ML4HL ACTG175 RAI Toolbox — pip requirements
 # Tested with Python 3.10.x
 # ==============================================================
 
 # --- Core scientific stack ---
-numpy==1.26.4
-pandas==2.2.2
-scipy==1.14.0
+# responsibleai 0.34.0 requires numpy<=1.26.2 AND pandas<2.0.0
+numpy==1.26.2
+pandas==1.5.3
+scipy==1.11.4
 scikit-learn==1.5.1
 matplotlib==3.9.1
 seaborn==0.13.2
@@ -18,9 +18,14 @@ jupyterlab==4.2.4
 ipywidgets==8.1.3
 
 # --- Responsible AI ecosystem ---
+# Pin ONLY the top-level packages. Let pip resolve their
+# internal sub-dependencies (fairlearn, interpret-community,
+# erroranalysis, etc.) automatically to avoid conflicts.
 responsibleai==0.34.0
 raiwidgets==0.34.0
-fairlearn==0.10.0
-interpret-community==0.31.0
-erroranalysis==0.5.4
+
+# --- Causal inference (used by RAI causal component) ---
 econml==0.15.1
+
+# --- Dataset download (optional — fallback if CSV not present) ---
+ucimlrepo>=0.0.7
