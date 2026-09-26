@@ -1,8 +1,0 @@
-# Copyright (c) Microsoft Corporation
-# Licensed under the MIT License.
-
-name = 'erroranalysis'
-_major = '0'
-_minor = '5'
-_patch = '5'
-version = '{}.{}.{}'.format(_major, _minor, _patch)
