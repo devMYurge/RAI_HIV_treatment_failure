@@ -24,6 +24,7 @@ Functions
 - plot_topk_at_threshold
 - make_thresholded_estimator / ThresholdedEstimator
 - init_rai_dependencies   – safe import of optional RAI packages
+- subgroup_report         – Return subgroup performance for a binary classifier at a fixed threshold.
 """
 
 from typing import Dict, Optional, Tuple
@@ -56,6 +57,7 @@ __all__ = [
     "plot_topk_at_threshold",
     "make_thresholded_estimator",
     "init_rai_dependencies",
+    "subgroup_report",
 ]
 
 
@@ -405,6 +407,66 @@ def summary_at_threshold(y_true, y_score, threshold) -> pd.DataFrame:
         "true_pos_per_1000": 1000.0 * float(tp) / n,
     }])
 
+# ──────────────────────────────────────────────
+#  Subgroup Report
+# ──────────────────────────────────────────────
+
+def subgroup_report(y_true, y_score, groups, group_map, threshold=0.5):
+    """Return subgroup performance for a binary classifier at a fixed threshold.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True binary labels.
+    y_score : array-like
+        Continuous positive-class scores.
+    groups : array-like
+        Subgroup membership vector.
+    group_map : dict
+        Mapping {display_label: subgroup_value}.
+    threshold : float
+        Decision threshold.
+
+    Returns
+    -------
+    pd.DataFrame
+        Subgroup table with N, failures, prevalence, recall, precision,
+        and alerts per 1,000.
+    """
+    y_true = np.asarray(y_true).ravel().astype(int)
+    y_score = np.asarray(y_score).ravel()
+    groups = np.asarray(groups).ravel()
+    y_pred = (y_score >= float(threshold)).astype(int)
+
+    rows = []
+    for label, value in group_map.items():
+        mask = groups == value
+        n = int(mask.sum())
+        if n == 0:
+            continue
+
+        yt = y_true[mask]
+        yp = y_pred[mask]
+        failures = int(yt.sum())
+
+        if failures == 0 or failures == n:
+            rec = np.nan
+            prec = np.nan
+        else:
+            rec = recall_score(yt, yp, zero_division=0)
+            prec = precision_score(yt, yp, zero_division=0)
+
+        rows.append({
+            "Group": label,
+            "N": n,
+            "Failures": failures,
+            "Prevalence": f"{failures / n:.3f}" if n else "0.000",
+            "Recall": f"{rec:.3f}" if np.isfinite(rec) else "n/a",
+            "Precision": f"{prec:.3f}" if np.isfinite(prec) else "n/a",
+            "Alerts/1000": f"{yp.mean() * 1000:.0f}" if n else "0",
+        })
+
+    return pd.DataFrame(rows)
 
 # ──────────────────────────────────────────────
 #  Validation visualisations

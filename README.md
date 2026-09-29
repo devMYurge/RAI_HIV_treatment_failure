@@ -23,7 +23,7 @@ Adapted from: [IE-ML-for-Healthcare/RAI_opioid_risk_prevention](https://github.c
 |---|---|
 | `ML4HL_ACTG175_RAI_toolbox.ipynb` | Main notebook — all 9 rubric steps |
 | `utils.py` | Helper functions: AUC reporting, threshold policies, plots |
-| `Data/ACTG175.csv` | AIDS Clinical Trials Group Study 175 dataset (2,139 records) |
+| `data/ACTG175.csv` | AIDS Clinical Trials Group Study 175 dataset (2,139 records) |
 | `environment.yml` | Conda environment with pinned dependencies |
 | `requirements.txt` | pip requirements (alternative to conda) |
 | `SETUP_GUIDE.md` | Local environment setup with troubleshooting |
@@ -204,7 +204,7 @@ This is randomised clinical trial data, making causal estimates more credible th
 | Import errors | Recreate env: `conda env remove -n actg175_rai && conda env create -f environment.yml` |
 | Plots not showing | Ensure `%matplotlib inline` or use JupyterLab default |
 | Widget errors | Verify: `python -c "import ipywidgets; print(ipywidgets.__version__)"` |
-| Dataset not found | Notebook auto-downloads from UCI; or manually place CSV in `Data/ACTG175.csv` |
+| Dataset not found | Notebook auto-downloads from UCI; or manually place CSV in `data/ACTG175.csv` |
 | Python 3.12+ errors | RAI packages require Python 3.10. Use `python3.10 -m venv .venv` |
 
 ---

@@ -23,7 +23,7 @@ mkdir actg175-rai-project && cd actg175-rai-project
 Place these files inside:
 ```
 actg175-rai-project/
-├── Data/
+├── data/
 │   └── ACTG175.csv            ← download or auto-fetched by notebook
 ├── ML4HL_ACTG175_RAI_toolbox.ipynb
 ├── utils.py
@@ -100,13 +100,13 @@ jupyter lab
 The notebook automatically attempts to load the dataset. You have two options:
 
 ### Option 1 — Automatic Download (recommended)
-The notebook's first data cell tries `pd.read_csv("Data/ACTG175.csv")`. If the file doesn't exist, it auto-downloads from UCI using `ucimlrepo`:
+The notebook's first data cell tries `pd.read_csv("data/ACTG175.csv")`. If the file doesn't exist, it auto-downloads from UCI using `ucimlrepo`:
 
 ```python
 from ucimlrepo import fetch_ucirepo
 data = fetch_ucirepo(id=890)
 df = pd.concat([data.data.features, data.data.targets], axis=1)
-df.to_csv("Data/ACTG175.csv", index=False)
+df.to_csv("data/ACTG175.csv", index=False)
 ```
 
 This requires `pip install ucimlrepo` (included in requirements.txt).
@@ -114,7 +114,7 @@ This requires `pip install ucimlrepo` (included in requirements.txt).
 ### Option 2 — Manual Download
 1. Go to https://archive.ics.uci.edu/dataset/890/aids+clinical+trials+group+study+175
 2. Download the CSV file
-3. Place it at `Data/ACTG175.csv` in your project folder
+3. Place it at `data/ACTG175.csv` in your project folder
 
 ---
 
@@ -163,7 +163,7 @@ print(os.getcwd())  # Should show your project folder
 pip install ucimlrepo
 ```
 
-Or simply place the CSV manually in `Data/ACTG175.csv`.
+Or simply place the CSV manually in `data/ACTG175.csv`.
 
 ### ❌ Slow install / timeout
 
@@ -189,7 +189,7 @@ import pandas as pd
 
 # Try local file first, then UCI download
 try:
-    df = pd.read_csv("Data/ACTG175.csv")
+    df = pd.read_csv("data/ACTG175.csv")
 except FileNotFoundError:
     from ucimlrepo import fetch_ucirepo
     data = fetch_ucirepo(id=890)
