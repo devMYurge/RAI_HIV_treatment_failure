@@ -24,7 +24,16 @@ Functions
 - plot_topk_at_threshold
 - make_thresholded_estimator / ThresholdedEstimator
 - init_rai_dependencies   – safe import of optional RAI packages
-- subgroup_report         – Return subgroup performance for a binary classifier at a fixed threshold.
+- subgroup_report         – subgroup recall/precision/alerts at a fixed threshold (+ Wilson CI)
+- expected_calibration_error / calibration_summary / plot_reliability – calibration metrics and plot
+- bootstrap_metric_ci / threshold_stability – uncertainty of AUC, recall and alert volume
+- tiered_alert_table      – two-tier (intensive / light-touch) operating point
+- group_recall_floor_thresholds / apply_group_thresholds – per-group thresholds
+- ppv_under_prevalence    – PPV / workload if event prevalence shifts
+- leakage_audit           – computed leakage checks
+- subgroup_auc, error_tree_paths, whatif_risk_by_arm, cf_summary – RAI-result helpers
+- monitoring_check        – one monitoring cycle with alert triggers
+- NumericArmAdapter / encode_arm – lets Fairlearn call a model with a string treatment column
 """
 
 from typing import Dict, Optional, Tuple
@@ -58,6 +67,11 @@ __all__ = [
     "make_thresholded_estimator",
     "init_rai_dependencies",
     "subgroup_report",
+    "expected_calibration_error", "calibration_summary", "plot_reliability",
+    "bootstrap_metric_ci", "threshold_stability", "tiered_alert_table",
+    "group_recall_floor_thresholds", "apply_group_thresholds", "ppv_under_prevalence",
+    "leakage_audit", "subgroup_auc", "error_tree_paths", "whatif_risk_by_arm",
+    "cf_summary", "monitoring_check", "NumericArmAdapter", "encode_arm",
 ]
 
 
@@ -412,26 +426,18 @@ def summary_at_threshold(y_true, y_score, threshold) -> pd.DataFrame:
 # ──────────────────────────────────────────────
 
 def subgroup_report(y_true, y_score, groups, group_map, threshold=0.5):
-    """Return subgroup performance for a binary classifier at a fixed threshold.
+    """Subgroup performance at a fixed threshold, with Wilson 95% CIs on recall.
 
     Parameters
     ----------
-    y_true : array-like
-        True binary labels.
-    y_score : array-like
-        Continuous positive-class scores.
-    groups : array-like
-        Subgroup membership vector.
-    group_map : dict
-        Mapping {display_label: subgroup_value}.
+    y_true, y_score : array-like  (labels, positive-class scores)
+    groups : array-like           subgroup membership vector
+    group_map : dict              {display_label: subgroup_value}
     threshold : float
-        Decision threshold.
 
-    Returns
-    -------
-    pd.DataFrame
-        Subgroup table with N, failures, prevalence, recall, precision,
-        and alerts per 1,000.
+    Returns a DataFrame with N, failures, prevalence, recall (+CI), precision,
+    missed cases (FN), and alerts per 1,000.  Groups with a single class get
+    NaN recall/precision rather than a misleading number.
     """
     y_true = np.asarray(y_true).ravel().astype(int)
     y_score = np.asarray(y_score).ravel()
@@ -444,29 +450,24 @@ def subgroup_report(y_true, y_score, groups, group_map, threshold=0.5):
         n = int(mask.sum())
         if n == 0:
             continue
-
-        yt = y_true[mask]
-        yp = y_pred[mask]
+        yt, yp = y_true[mask], y_pred[mask]
         failures = int(yt.sum())
-
-        if failures == 0 or failures == n:
-            rec = np.nan
-            prec = np.nan
+        tp = int(((yt == 1) & (yp == 1)).sum())
+        fn = failures - tp
+        row = {"Group": label, "N": n, "Failures": failures,
+               "Prevalence": round(failures / n, 3)}
+        if 0 < failures < n:
+            lo, hi = wilson_interval(tp, failures)
+            row.update({"Recall": round(tp / failures, 3),
+                        "Recall 95% CI": f"{lo:.2f}-{hi:.2f}",
+                        "Precision": round(precision_score(yt, yp, zero_division=0), 3)})
         else:
-            rec = recall_score(yt, yp, zero_division=0)
-            prec = precision_score(yt, yp, zero_division=0)
-
-        rows.append({
-            "Group": label,
-            "N": n,
-            "Failures": failures,
-            "Prevalence": f"{failures / n:.3f}" if n else "0.000",
-            "Recall": f"{rec:.3f}" if np.isfinite(rec) else "n/a",
-            "Precision": f"{prec:.3f}" if np.isfinite(prec) else "n/a",
-            "Alerts/1000": f"{yp.mean() * 1000:.0f}" if n else "0",
-        })
-
+            row.update({"Recall": np.nan, "Recall 95% CI": "n/a",
+                        "Precision": np.nan})
+        row.update({"Missed (FN)": fn, "Alerts/1000": round(yp.mean() * 1000)})
+        rows.append(row)
     return pd.DataFrame(rows)
+
 
 # ──────────────────────────────────────────────
 #  Validation visualisations
@@ -641,3 +642,268 @@ def make_thresholded_estimator(base_estimator, threshold: float = 0.5,
     """Convenience factory for ThresholdedEstimator."""
     return ThresholdedEstimator(base_estimator, threshold=threshold,
                                positive_label=positive_label)
+
+
+# ──────────────────────────────────────────────
+#  Additions: calibration, uncertainty, leakage audit, fairness helpers
+# ──────────────────────────────────────────────
+from sklearn.metrics import brier_score_loss, roc_auc_score
+from sklearn.calibration import calibration_curve
+
+
+def expected_calibration_error(y_true, y_prob, n_bins: int = 10) -> float:
+    """Equal-frequency-bin Expected Calibration Error (ECE)."""
+    y_true = np.asarray(y_true).ravel(); y_prob = np.asarray(y_prob).ravel()
+    order = np.argsort(y_prob)
+    bins = np.array_split(order, n_bins)
+    ece = 0.0
+    for idx in bins:
+        if len(idx):
+            ece += len(idx) / len(y_true) * abs(y_true[idx].mean() - y_prob[idx].mean())
+    return float(ece)
+
+
+def calibration_summary(y_true, scores: dict) -> pd.DataFrame:
+    """Brier, Brier skill score (vs. prevalence-only forecast), ECE, CITL."""
+    y_true = np.asarray(y_true).ravel()
+    p = y_true.mean()
+    ref = brier_score_loss(y_true, np.full(len(y_true), p))
+    rows = []
+    for name, s_ in scores.items():
+        b = brier_score_loss(y_true, s_)
+        rows.append({"Model": name, "Brier": round(b, 4),
+                     "Brier skill vs prevalence": round(1 - b / ref, 3),
+                     "ECE": round(expected_calibration_error(y_true, s_), 4),
+                     "Mean pred": round(float(np.mean(s_)), 3),
+                     "Observed": round(p, 3)})
+    return pd.DataFrame(rows)
+
+
+def plot_reliability(y_true, scores: dict, n_bins: int = 8, title="Reliability plot", save=None):
+    """Reliability curves (equal-frequency bins) + histogram of predictions."""
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(5.5, 7), height_ratios=[3, 1],
+                                  sharex=True)
+    for name, s_ in scores.items():
+        fp, mp = calibration_curve(y_true, s_, n_bins=n_bins, strategy="quantile")
+        ax.plot(mp, fp, "o-", label=name)
+    ax.plot([0, 1], [0, 1], "k--", label="Perfect")
+    ax.set_ylabel("Observed failure rate"); ax.set_title(title); ax.legend()
+    for name, s_ in scores.items():
+        ax2.hist(s_, bins=20, alpha=.5, label=name)
+    ax2.set_xlabel("Predicted probability"); ax2.set_ylabel("Patients")
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+def bootstrap_metric_ci(y_true, y_score, fn, n_boot: int = 1000, seed: int = 42):
+    """Percentile bootstrap CI for any fn(y, score) -> float."""
+    rng = np.random.default_rng(seed)
+    y_true = np.asarray(y_true); y_score = np.asarray(y_score)
+    vals = []
+    for _ in range(n_boot):
+        i = rng.integers(0, len(y_true), len(y_true))
+        if y_true[i].min() == y_true[i].max():
+            continue
+        vals.append(fn(y_true[i], y_score[i]))
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
+def threshold_stability(y_true, y_score, threshold, n_boot: int = 2000, seed: int = 42):
+    """Bootstrap the recall / alerts-per-1000 obtained at a FIXED threshold.
+
+    Shows how much a threshold tuned on ~78 positives can move on new patients.
+    """
+    rng = np.random.default_rng(seed)
+    y_true = np.asarray(y_true); y_score = np.asarray(y_score)
+    rec, alr = [], []
+    for _ in range(n_boot):
+        i = rng.integers(0, len(y_true), len(y_true))
+        yt, ys = y_true[i], y_score[i]
+        pred = ys >= threshold
+        if yt.sum() == 0:
+            continue
+        rec.append((pred & (yt == 1)).sum() / yt.sum()); alr.append(pred.mean() * 1000)
+    q = lambda a: (float(np.percentile(a, 2.5)), float(np.percentile(a, 97.5)))
+    return {"recall_ci": q(rec), "alerts_ci": q(alr)}
+
+
+def tiered_alert_table(y_true, y_score, t_high, t_low, label=""):
+    """Two-tier operating point: Tier 1 (score>=t_high) gets intensive follow-up,
+    Tier 2 (t_low<=score<t_high) gets a light-touch check. Returns one row."""
+    y = np.asarray(y_true).astype(int); s_ = np.asarray(y_score)
+    t1 = s_ >= t_high; t2 = (s_ >= t_low) & ~t1
+    pos = max(y.sum(), 1)
+    return {"Set": label,
+            "Tier1 alerts/1000": round(t1.mean() * 1000),
+            "Tier2 alerts/1000": round(t2.mean() * 1000),
+            "Recall Tier1": round((t1 & (y == 1)).sum() / pos, 3),
+            "Recall Tier1+2": round(((t1 | t2) & (y == 1)).sum() / pos, 3),
+            "Missed (untiered)": int(((~(t1 | t2)) & (y == 1)).sum())}
+
+
+def group_recall_floor_thresholds(y_true, y_score, groups, recall_floor=0.60):
+    """Per-group thresholds: the highest threshold in each group that still gives
+    recall >= floor on the FITTING data (validation). Returns {group_value: thr}."""
+    y_true = np.asarray(y_true); y_score = np.asarray(y_score); groups = np.asarray(groups)
+    out = {}
+    for g in np.unique(groups):
+        m = groups == g
+        pos_scores = np.sort(y_score[m][y_true[m] == 1])[::-1]
+        k = int(np.ceil(recall_floor * len(pos_scores)))
+        out[g] = float(pos_scores[k - 1])
+    return out
+
+
+def apply_group_thresholds(y_score, groups, thr_map):
+    y_score = np.asarray(y_score); groups = np.asarray(groups)
+    thr = np.array([thr_map[g] for g in groups])
+    return (y_score >= thr).astype(int)
+
+
+def ppv_under_prevalence(tpr: float, fpr: float, prevalence: float) -> float:
+    """PPV if the SAME classifier (TPR/FPR) were used at a different prevalence."""
+    return tpr * prevalence / (tpr * prevalence + fpr * (1 - prevalence))
+
+
+def leakage_audit(X_train, X_val, X_test, forbidden, fitted_pipeline, num_cols):
+    """Computed (not hard-coded) leakage checks. Returns a DataFrame."""
+    checks = []
+    feats = set(X_train.columns)
+    checks.append(("No post-randomisation / outcome-derived columns in features",
+                   not (feats & set(forbidden)), f"forbidden={sorted(forbidden)}"))
+    idx = [set(X_train.index), set(X_val.index), set(X_test.index)]
+    checks.append(("Train / val / test are disjoint patients",
+                   not (idx[0] & idx[1] or idx[0] & idx[2] or idx[1] & idx[2]),
+                   f"sizes={[len(i) for i in idx]}"))
+    scaler = fitted_pipeline.named_steps["prep"].named_transformers_["num"]
+    checks.append(("StandardScaler statistics come from TRAIN only",
+                   np.allclose(scaler.mean_, X_train[num_cols].mean().values),
+                   "scaler.mean_ == train mean (differs from val/test mean)"))
+    checks.append(("Scaler mean differs from full-data mean (proves no peeking)",
+                   not np.allclose(scaler.mean_, np.concatenate([X_train[num_cols].values,
+                                    X_val[num_cols].values, X_test[num_cols].values]).mean(0)),
+                   ""))
+    return pd.DataFrame(checks, columns=["Check", "Passed", "Evidence"])
+
+
+# ──────────────────────────────────────────────
+#  RAI-result extraction helpers (static equivalents of dashboard views)
+# ──────────────────────────────────────────────
+
+def subgroup_auc(y_true, y_score, groups, group_map, n_boot=500, seed=42):
+    """ROC AUC per subgroup with bootstrap 95% CI."""
+    y_true = np.asarray(y_true); y_score = np.asarray(y_score); groups = np.asarray(groups)
+    rows = []
+    for label, value in group_map.items():
+        m = groups == value
+        yt, ys = y_true[m], y_score[m]
+        if len(np.unique(yt)) < 2:
+            rows.append({"Group": label, "N": int(m.sum()), "Failures": int(yt.sum()),
+                         "ROC AUC": np.nan, "95% CI": "n/a"}); continue
+        lo, hi = bootstrap_metric_ci(yt, ys, roc_auc_score, n_boot=n_boot, seed=seed)
+        rows.append({"Group": label, "N": int(m.sum()), "Failures": int(yt.sum()),
+                     "ROC AUC": round(roc_auc_score(yt, ys), 3), "95% CI": f"{lo:.2f}-{hi:.2f}"})
+    return pd.DataFrame(rows)
+
+
+def error_tree_paths(error_report, min_size: int = 15, top: int = 6) -> pd.DataFrame:
+    """Turn the RAI error-analysis tree into readable leaf rules, worst first."""
+    nodes = {n["id"]: n for n in error_report.tree}
+    children = {}
+    for n in error_report.tree:
+        children.setdefault(n["parentId"], []).append(n["id"])
+    rows = []
+    for nid, n in nodes.items():
+        if nid in children or n["parentId"] is None:
+            continue  # only leaves
+        conds, cur = [], n
+        while cur["parentId"] is not None:
+            conds.append(cur["condition"]); cur = nodes[cur["parentId"]]
+        size = int(n["size"])
+        if size >= min_size:
+            rows.append({"Rule (path from root)": " AND ".join(reversed(conds)),
+                         "Patients": size, "Errors": int(n["error"]),
+                         "Error rate": round(n["error"] / size, 3)})
+    return pd.DataFrame(rows).sort_values("Error rate", ascending=False).head(top).reset_index(drop=True)
+
+
+def whatif_risk_by_arm(model, X, arm_col="arm", arms=None):
+    """Predicted risk for every patient under every regimen (all else equal)."""
+    arms = arms or list(X[arm_col].unique())
+    out = {}
+    for a in arms:
+        Xa = X.copy(); Xa[arm_col] = a
+        out[a] = positive_scores(model, Xa)
+    return pd.DataFrame(out, index=X.index)
+
+
+def cf_summary(cf_result, pred_col_name="test_pred"):
+    """Summarise DiCE counterfactuals restricted to the treatment column."""
+    rows = []
+    for ex in cf_result.cf_examples_list:
+        orig = ex.test_instance_df.iloc[0]
+        cfs = ex.final_cfs_df
+        pred0 = int(np.ravel(ex.test_pred)[0]) if np.ndim(ex.test_pred) else int(ex.test_pred)
+        rows.append({"orig_arm": orig["arm"], "orig_pred": pred0,
+                     "n_flip_arms": 0 if cfs is None else len(cfs),
+                     "flip_arms": [] if cfs is None else list(cfs["arm"])})
+    return pd.DataFrame(rows)
+
+
+def monitoring_check(y_true, y_score, threshold, race, gender,
+                     alert_cap=300, recall_floor_group=0.50, fnr_gap_max=0.10,
+                     calib_gap_max=0.05):
+    """One monitoring cycle: compute the KPIs and compare with alert triggers.
+
+    Designed to be run monthly/quarterly on the latest cohort with known outcomes.
+    """
+    y = np.asarray(y_true).astype(int); s_ = np.asarray(y_score)
+    race = np.asarray(race); gender = np.asarray(gender)
+    pred = (s_ >= threshold).astype(int)
+    def rec(m):
+        return np.nan if y[m].sum() == 0 else (pred[m] & y[m]).sum() / y[m].sum()
+    r = {g: rec(race == g) for g in (0, 1)}; gd = {g: rec(gender == g) for g in (0, 1)}
+    rows = [
+        ("Alerts per 1,000", round(pred.mean() * 1000), f"<= {alert_cap}", pred.mean() * 1000 <= alert_cap),
+        ("Recall White", round(r[0], 3), f">= {recall_floor_group}", r[0] >= recall_floor_group),
+        ("Recall Non-white", round(r[1], 3), f">= {recall_floor_group}", r[1] >= recall_floor_group),
+        ("Recall Female", round(gd[0], 3), f">= {recall_floor_group}", gd[0] >= recall_floor_group),
+        ("Recall Male", round(gd[1], 3), f">= {recall_floor_group}", gd[1] >= recall_floor_group),
+        ("FNR gap (race)", round(abs(r[0] - r[1]), 3), f"<= {fnr_gap_max}", abs(r[0] - r[1]) <= fnr_gap_max),
+        ("|mean pred - observed|", round(abs(s_.mean() - y.mean()), 3), f"<= {calib_gap_max}", abs(s_.mean() - y.mean()) <= calib_gap_max),
+    ]
+    out = pd.DataFrame(rows, columns=["KPI", "Value", "Trigger (OK if)", "OK"])
+    out["Status"] = np.where(out["OK"], "OK", "ALERT")
+    return out.drop(columns="OK")
+
+
+class NumericArmAdapter(BaseEstimator, ClassifierMixin):
+    """Lets libraries that force float inputs (e.g. Fairlearn's ThresholdOptimizer)
+    call a model that expects a string treatment column.
+
+    The arm column is passed as an integer code and decoded back to its label
+    before the wrapped model sees it. Used ONLY for post-processing experiments."""
+
+    def __init__(self, base, columns, arm_col, arm_labels):
+        self.base, self.columns, self.arm_col, self.arm_labels = base, list(columns), arm_col, list(arm_labels)
+        self.classes_ = getattr(base, 'classes_', np.array([0, 1]))   # marks the adapter as 'fitted'
+
+    def fit(self, X=None, y=None, **kw):   # no-op: the wrapped model is already fitted
+        return self
+
+    def _frame(self, X):
+        df_ = pd.DataFrame(np.asarray(X, dtype=float), columns=self.columns)
+        df_[self.arm_col] = [self.arm_labels[int(round(v))] for v in df_[self.arm_col]]
+        return df_
+
+    def predict_proba(self, X):
+        return self.base.predict_proba(self._frame(X))
+
+    def predict(self, X):
+        return self.base.predict(self._frame(X))
+
+
+def encode_arm(X, arm_col, arm_labels):
+    """Numeric copy of X with the treatment label replaced by its integer code."""
+    X = X.copy(); X[arm_col] = X[arm_col].map({a: i for i, a in enumerate(arm_labels)}); return X
